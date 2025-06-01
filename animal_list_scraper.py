@@ -1,3 +1,31 @@
+"""
+Animal List Scraper
+
+This script crawls a paginated adoption listing page (dogs or cats) on dogcat.com.ua,
+extracts basic information (pet_id, profile URL, name, sex, age, and thumbnail photo URL)
+for each animal card, and writes the results to a CSV file.
+
+Features:
+- Handles pagination by following “Next” links until no more pages remain.
+- Uses requests + BeautifulSoup for HTML parsing.
+- Skips any animal entry missing a required field (pet_id, link, name, sex, age, or photo_url).
+- Avoids duplicate entries by deduplicating on profile URL.
+
+Expected output CSV format:
+    pet_id,link,name,sex,age,photo_url
+    1728,https://dogcat.com.ua/pet/piksel,Піксель,Хлопчик,1 місяць,https://dogcat.com.ua/fm/pixel/photo.jpg
+    ...
+
+Command-line arguments:
+    base_url       Starting URL to scrape (e.g., https://dogcat.com.ua/adoption?animal=2).
+    -o, --output   Path to the output CSV file (default: ./data/cats/data.csv).
+
+Example usage:
+    python animal_list_scraper.py \
+        "https://dogcat.com.ua/adoption?animal=2" \
+        -o ./data/cats/data.csv
+"""
+
 import argparse
 import csv
 import logging

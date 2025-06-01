@@ -1,3 +1,36 @@
+"""
+Asynchronous Pet Adoption Profile Extractor
+
+This script reads a CSV file of pet adoption profile URLs (with pet IDs),
+fetches each profile page asynchronously using aiohttp + asyncio, and extracts
+detailed information (name, age, gender, photos, videos, about, history) via
+BeautifulSoup. The collected profiles are written to a JSON file.
+
+Features:
+- Concurrent HTTP requests controlled by a semaphore (configurable concurrency level).
+- Robust error handling and logging for failed fetches or missing data.
+- Parses “About” and “History” sections, plus both image and video URLs.
+- Supports command-line configuration of input CSV, output JSON, and concurrency.
+
+Expected CSV format:
+    pet_id,link
+    1728,https://dogcat.com.ua/pet/piksel
+    1727,https://dogcat.com.ua/pet/cimba
+    ...
+
+Command-line arguments:
+    csv_path           Path to the input CSV file (required).
+    -o, --output       Path to the output JSON file
+                       (default: ./data/cats/adoption_profiles.json).
+    -n, --concurrency  Number of simultaneous requests (default: 10).
+
+Example usage:
+    python adoption_profiles_scraper.py \
+        ./data/cats/data.csv \
+        -o ./data/cats/adoption_profiles.json \
+        -n 20
+"""
+
 import argparse
 import asyncio
 import csv

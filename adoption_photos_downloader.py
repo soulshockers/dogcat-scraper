@@ -1,0 +1,115 @@
+import argparse
+import asyncio
+import json
+import logging
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+
+import aiohttp
+from aiohttp import ClientSession
+
+
+logger = logging.getLogger(__name__)
+
+
+async def download_photo(session: ClientSession, semaphore: asyncio.Semaphore, url: str, output_path: str):
+    async with semaphore:
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    content = await response.read()
+                    with open(output_path, 'wb') as f:
+                        f.write(content)
+                    logger.info(f"Downloaded {url} -> {output_path}")
+                else:
+                    logger.warning(f"Failed to download {url}, status code: {response.status}")
+        except Exception as e:
+            logger.error(f"Error downloading {url}: {e}")
+
+
+async def download_all_photos(json_path: str, concurrency: int):
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    base_dir = Path(json_path).parent
+    photos_dir = base_dir / 'photos'
+    photos_dir.mkdir(exist_ok=True)
+
+    semaphore = asyncio.Semaphore(concurrency)
+    connector = aiohttp.TCPConnector(limit_per_host=concurrency)
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/91.0.4472.124 Safari/537.36'
+        )
+    }
+
+    async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+        tasks = []
+
+        for pet in data:
+            pet_id = pet.get('pet_id')
+            photos = pet.get('photos', [])
+            if not pet_id:
+                logger.warning("Skipping entry with missing pet_id.")
+                continue
+            if not photos:
+                logger.info(f"No photos for pet_id {pet_id}, skipping.")
+                continue
+
+            pet_dir = photos_dir / pet_id
+            pet_dir.mkdir(exist_ok=True)
+
+            for url in photos:
+                filename = os.path.basename(urlparse(url).path)
+                if not filename:
+                    logger.warning(f"Skipping invalid URL (no filename) for pet_id {pet_id}: {url}")
+                    continue
+                output_path = pet_dir / filename
+                tasks.append(download_photo(session, semaphore, url, str(output_path)))
+
+        await asyncio.gather(*tasks)
+
+    logger.info("Download complete.")
+
+
+def setup_logging():
+    script_path = Path(__file__).resolve()
+    script_name = script_path.stem
+    logs_dir = script_path.parent / 'logs'
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = logs_dir / f"{script_name}.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.FileHandler(log_file, encoding='utf-8', mode='a'),  # appending mode
+            logging.StreamHandler()
+        ]
+    )
+
+def main():
+    setup_logging()
+
+    parser = argparse.ArgumentParser(description="Download pet photos from adoption JSON file")
+    parser.add_argument("json_path", help="Path to the input JSON file")
+    parser.add_argument(
+        '-n', '--concurrency',
+        type=int,
+        default=10,
+        help='Number of simultaneous requests (default: 10)'
+    )
+    args = parser.parse_args()
+
+    logger.info(f"Starting download using JSON: {args.json_path} with concurrency={args.concurrency}")
+
+    asyncio.run(download_all_photos(args.json_path, args.concurrency))
+
+
+if __name__ == '__main__':
+    main()

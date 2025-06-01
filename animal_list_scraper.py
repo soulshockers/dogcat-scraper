@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 
 def setup_logging():
+    """
+    Configures logging to write both to a rotating log file and to console.
+    Log files are saved in a `logs` directory next to the script.
+    """
     script_path = Path(__file__).resolve()
     script_name = script_path.stem
     logs_dir = script_path.parent / 'logs'
@@ -59,7 +63,17 @@ def setup_logging():
 
 
 def extract_animal_data(base_url):
-    animal_data = {}
+    """
+    Crawls the paginated animal listing starting from `base_url`, extracting
+    pet_id, link, name, sex, age, and photo_url from each animal card.
+
+    Args:
+        base_url (str): URL to the first listing page to begin scraping from.
+
+    Returns:
+        list[dict]: List of unique animal entries with required fields.
+    """
+    animal_data = {}  # Dictionary keyed by profile URL to deduplicate
     session = requests.Session()
     headers = {
         'User-Agent': (
@@ -77,9 +91,10 @@ def extract_animal_data(base_url):
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            cards = soup.select('div.animalCard')
+            cards = soup.select('div.animalCard')  # Select all animal cards on the page
 
             for card in cards:
+                # Attempt to extract pet_id from onclick attribute
                 pet_id = None
                 adopt_btn = card.select_one('button[onclick*="setPopupData"]')
                 if adopt_btn:
@@ -88,12 +103,15 @@ def extract_animal_data(base_url):
                     if match:
                         pet_id = match.group(1)
 
+                # Extract profile link
                 link_tag = card.select_one('a.animalCard__link')
                 link = link_tag['href'] if link_tag and link_tag.get('href') else None
 
+                # Extract pet name
                 name_tag = card.select_one('h5')
                 name = name_tag.get_text(strip=True) if name_tag else None
 
+                # Extract sex and age from <p> tag
                 sex, age = "", ""
                 p_tag = card.select_one('p')
                 if p_tag:
@@ -103,9 +121,11 @@ def extract_animal_data(base_url):
                         if len(parts) > 1:
                             age = parts[1]
 
+                # Extract photo thumbnail URL
                 img_tag = card.select_one('img.animalCard__photo')
                 photo_url = img_tag['data-src'] if img_tag and img_tag.get('data-src') else None
 
+                # Skip entries with missing required fields
                 if not all([pet_id, link, name, sex, age, photo_url]):
                     logger.warning(
                         f"Skipping animal due to missing data: pet_id={pet_id}, link={link}, "
@@ -113,6 +133,7 @@ def extract_animal_data(base_url):
                     )
                     continue
 
+                # Deduplicate based on profile URL
                 if link in animal_data:
                     continue
 
@@ -125,6 +146,7 @@ def extract_animal_data(base_url):
                     'photo_url': photo_url
                 }
 
+            # Look for the "Next" page button
             next_button = soup.select_one('a.next:not(.disabled)')
             current_url = next_button['href'] if next_button and next_button.get('href') else None
             logger.info(f"Processed page: {current_url or '(no more pages)'}")
@@ -141,6 +163,9 @@ def extract_animal_data(base_url):
 
 
 def main():
+    """
+    Entry point of the script. Parses arguments, initiates scraping, and writes results to CSV.
+    """
     setup_logging()
 
     parser = argparse.ArgumentParser(
@@ -164,11 +189,13 @@ def main():
         logger.warning("No animal data found. Exiting.")
         return
 
+    # Ensure the output directory exists
     output_dir = os.path.dirname(args.output)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
     try:
+        # Write extracted data to CSV
         with open(args.output, mode='w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['pet_id', 'link', 'name', 'sex', 'age', 'photo_url'])

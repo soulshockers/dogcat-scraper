@@ -48,36 +48,62 @@ from urllib.parse import urlparse
 import aiohttp
 from aiohttp import ClientSession
 
-
+# Global logger, initialized in setup_logging()
 logger = logging.getLogger(__name__)
 
 
 async def download_photo(session: ClientSession, semaphore: asyncio.Semaphore, url: str, output_path: str):
+    """
+    Download a single photo asynchronously, respecting the concurrency semaphore.
+
+    Args:
+        session (ClientSession): The shared aiohttp session for all requests.
+        semaphore (asyncio.Semaphore): Semaphore to throttle concurrent downloads.
+        url (str): URL of the photo to download.
+        output_path (str): Filesystem path where the downloaded photo will be saved.
+    """
     async with semaphore:
         try:
+            # Perform an HTTP GET request to fetch the photo
             async with session.get(url) as response:
                 if response.status == 200:
+                    # Read the response content (binary) and write to file
                     content = await response.read()
                     with open(output_path, 'wb') as f:
                         f.write(content)
                     logger.info(f"Downloaded {url} -> {output_path}")
                 else:
+                    # Log a warning if the HTTP status is not 200 OK
                     logger.warning(f"Failed to download {url}, status code: {response.status}")
         except Exception as e:
+            # Catch and log any exceptions during download
             logger.error(f"Error downloading {url}: {e}")
 
 
 async def download_all_photos(json_path: str, concurrency: int):
+    """
+    Read the JSON of adoption profiles, create directories per pet_id,
+    and spawn concurrent download tasks for each photo URL.
+
+    Args:
+        json_path (str): Path to the JSON file containing profiles.
+        concurrency (int): Maximum number of concurrent download tasks.
+    """
+    # Load profiles JSON
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
+    # Determine base directory and create a 'photos' folder next to the JSON
     base_dir = Path(json_path).parent
     photos_dir = base_dir / 'photos'
     photos_dir.mkdir(exist_ok=True)
 
+    # Semaphore to limit concurrent downloads
     semaphore = asyncio.Semaphore(concurrency)
+    # Limit per-host connections to the same concurrency value
     connector = aiohttp.TCPConnector(limit_per_host=concurrency)
     headers = {
+        # Use a realistic User-Agent to avoid potential blocking
         'User-Agent': (
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
             'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -85,36 +111,51 @@ async def download_all_photos(json_path: str, concurrency: int):
         )
     }
 
+    # Create a shared aiohttp client session
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         tasks = []
 
+        # Iterate over each pet in the JSON data
         for pet in data:
             pet_id = pet.get('pet_id')
             photos = pet.get('photos', [])
+
+            # Skip entries without a pet_id
             if not pet_id:
                 logger.warning("Skipping entry with missing pet_id.")
                 continue
+            # If no photos, skip and log info
             if not photos:
                 logger.info(f"No photos for pet_id {pet_id}, skipping.")
                 continue
 
+            # Create a subdirectory for this pet_id under 'photos'
             pet_dir = photos_dir / pet_id
             pet_dir.mkdir(exist_ok=True)
 
+            # For each photo URL, schedule a download task
             for url in photos:
+                # Extract filename from URL path
                 filename = os.path.basename(urlparse(url).path)
                 if not filename:
                     logger.warning(f"Skipping invalid URL (no filename) for pet_id {pet_id}: {url}")
                     continue
+
                 output_path = pet_dir / filename
+                # Create and collect the coroutine for asynchronous download
                 tasks.append(download_photo(session, semaphore, url, str(output_path)))
 
+        # Run all download tasks concurrently
         await asyncio.gather(*tasks)
 
     logger.info("Download complete.")
 
 
 def setup_logging():
+    """
+    Configure logging to a file and console. Log file is named after the script
+    and stored in a 'logs' subdirectory, using append mode to avoid overwriting.
+    """
     script_path = Path(__file__).resolve()
     script_name = script_path.stem
     logs_dir = script_path.parent / 'logs'
@@ -127,26 +168,31 @@ def setup_logging():
         format="%(asctime)s %(levelname)-8s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            logging.FileHandler(log_file, encoding='utf-8', mode='a'),  # appending mode
+            logging.FileHandler(log_file, encoding='utf-8', mode='a'),  # append mode
             logging.StreamHandler()
         ]
     )
 
+
 def main():
+    """
+    Entry point: parse command-line arguments, configure logging,
+    and invoke the asynchronous download routine.
+    """
     setup_logging()
 
     parser = argparse.ArgumentParser(description="Download pet photos from adoption JSON file")
-    parser.add_argument("json_path", help="Path to the input JSON file")
+    parser.add_argument("json_path", help="Path to the input JSON file containing profiles")
     parser.add_argument(
         '-n', '--concurrency',
         type=int,
         default=10,
-        help='Number of simultaneous requests (default: 10)'
+        help='Number of simultaneous download requests (default: 10)'
     )
     args = parser.parse_args()
 
     logger.info(f"Starting download using JSON: {args.json_path} with concurrency={args.concurrency}")
-
+    # Run the asynchronous download_all_photos function
     asyncio.run(download_all_photos(args.json_path, args.concurrency))
 
 

@@ -35,15 +35,22 @@ import argparse
 import asyncio
 import csv
 import json
-import os
 import logging
+import os
 from pathlib import Path
 
 import aiohttp
 from bs4 import BeautifulSoup
 
+logger = None  # Will be initialized in setup_logging()
+
 
 def setup_logging():
+    """
+    Configure logging to write to a rotating log file in a 'logs' subdirectory
+    and also echo messages to the console. Log filename is based on script name.
+    """
+    global logger
     script_path = Path(__file__).resolve()
     script_name = script_path.stem
     logs_dir = script_path.parent / 'logs'
@@ -56,14 +63,23 @@ def setup_logging():
         format="%(asctime)s %(levelname)-8s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            logging.FileHandler(log_file, encoding='utf-8', mode='a'),
+            logging.FileHandler(log_file, encoding='utf-8', mode='a'),  # append mode
             logging.StreamHandler()
         ]
     )
-    return logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)
 
 
 def parse_age_gender(text):
+    """
+    Parse a comma-separated age and gender string into separate fields.
+
+    Args:
+        text (str): A string like "1 місяць, Хлопчик".
+
+    Returns:
+        tuple: (age, gender) or (None, None) if text is empty.
+    """
     if not text:
         return None, None
     parts = [p.strip() for p in text.split(',')]
@@ -73,6 +89,16 @@ def parse_age_gender(text):
 
 
 def extract_adoption_profile(html):
+    """
+    Extract detailed adoption profile information from a profile page's HTML.
+
+    Args:
+        html (str): Raw HTML content of an adoption profile page.
+
+    Returns:
+        dict or None: Dictionary containing profile fields (name, age, gender,
+                      photos, videos, about, history) or None if profile not found.
+    """
     soup = BeautifulSoup(html, 'html.parser')
     profile = soup.find('div', class_='adoptionProfilePage')
     if not profile:
@@ -80,34 +106,38 @@ def extract_adoption_profile(html):
 
     info = {}
 
+    # Extract the pet's name
     name_tag = profile.select_one('.profile-head h3')
     info['name'] = name_tag.text.strip() if name_tag else None
 
+    # Extract and split age and gender
     age_gender_tag = profile.select_one('.profile-head .body-secondary')
     age_gender_text = age_gender_tag.text.strip() if age_gender_tag else None
     age, gender = parse_age_gender(age_gender_text)
     info['age'] = age
     info['gender'] = gender
 
+    # Collect image and video URLs from the slider
     photo_urls = []
     video_urls = []
-
     for slide in profile.select('.swiper.slider-profile .swiper-slide'):
+        # Check if this slide is a video block
         video_block = slide.select_one('.videoBlock.img')
         if video_block:
             video_link = video_block.get('data-link')
             if video_link:
                 video_urls.append(video_link)
         else:
+            # Otherwise, extract image URL
             img_tag = slide.select_one('.img img')
             if img_tag:
                 url = img_tag.get('data-src')
                 if url:
                     photo_urls.append(url)
-
     info['photos'] = photo_urls
     info['videos'] = video_urls
 
+    # Extract 'about' section (pet skills)
     about_section = profile.select_one('.profile-skills')
     about_texts = []
     if about_section:
@@ -115,6 +145,7 @@ def extract_adoption_profile(html):
             about_texts.append(span.text.strip())
     info['about'] = about_texts
 
+    # Extract history text, removing newlines
     history_div = profile.find('div', class_='profile-history')
     history_text = None
     if history_div:
@@ -122,20 +153,31 @@ def extract_adoption_profile(html):
         if p_tag:
             history_text = p_tag.get_text(separator='\n').strip()
             history_text = history_text.replace('\n', '').replace('\r', '')
-
     info['history'] = history_text
 
     return info
 
 
 async def fetch_profile(session, semaphore, pet_id, url, results, counters):
+    """
+    Asynchronously fetch and parse a single adoption profile.
+
+    Args:
+        session (aiohttp.ClientSession): The HTTP session to use.
+        semaphore (asyncio.Semaphore): Semaphore to limit concurrency.
+        pet_id (str): Unique ID of the pet from the CSV.
+        url (str): URL of the pet's profile page.
+        results (list): Shared list to append extracted profile data.
+        counters (dict): Shared counters for success/fail metrics.
+    """
     async with semaphore:
         try:
             async with session.get(url) as resp:
                 if resp.status == 200:
-                    text = await resp.text()
-                    info = extract_adoption_profile(text)
+                    html = await resp.text()
+                    info = extract_adoption_profile(html)
                     if info:
+                        # Add the extracted fields to the results list
                         results.append({
                             'pet_id': pet_id,
                             'link': url,
@@ -161,6 +203,15 @@ async def fetch_profile(session, semaphore, pet_id, url, results, counters):
 
 
 async def main_async(csv_path, output_path, concurrency):
+    """
+    Main asynchronous routine to read URLs from CSV, fetch profiles in parallel,
+    and write the collected data to a JSON file.
+
+    Args:
+        csv_path (str): Path to the input CSV file containing pet_id and link columns.
+        output_path (str): Path to the output JSON file.
+        concurrency (int): Number of simultaneous fetch operations.
+    """
     logger.info(f"Reading URLs from: {csv_path}")
 
     results = []
@@ -178,6 +229,7 @@ async def main_async(csv_path, output_path, concurrency):
     connector = aiohttp.TCPConnector(limit_per_host=concurrency)
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         tasks = []
+        # Open and iterate over CSV to enqueue fetch tasks
         with open(csv_path, newline='', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
@@ -192,15 +244,21 @@ async def main_async(csv_path, output_path, concurrency):
 
                 counters['links'] += 1
                 logger.info(f"Fetching ({counters['links']}): {link}")
-                task = asyncio.create_task(fetch_profile(session, semaphore, pet_id, link, results, counters))
-                tasks.append(task)
+                tasks.append(
+                    asyncio.create_task(
+                        fetch_profile(session, semaphore, pet_id, link, results, counters)
+                    )
+                )
 
+        # Wait for all tasks to complete
         await asyncio.gather(*tasks)
 
+    # Ensure the output directory exists
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
+    # Write the results list as JSON
     try:
         with open(output_path, 'w', encoding='utf-8') as jsonfile:
             json.dump(results, jsonfile, ensure_ascii=False, indent=4)
@@ -208,7 +266,8 @@ async def main_async(csv_path, output_path, concurrency):
     except IOError as e:
         logger.error(f"Error writing to JSON file {output_path}: {e}")
 
-    logger.info(f"Summary:")
+    # Log summary statistics
+    logger.info("Summary:")
     logger.info(f"  Total URLs processed: {counters['links']}")
     logger.info(f"  Successful extractions: {counters['success']}")
     logger.info(f"  Missing profile info: {counters['missing_info']}")
@@ -216,17 +275,28 @@ async def main_async(csv_path, output_path, concurrency):
 
 
 def main():
-    global logger
+    """
+    Entry point: parse CLI arguments, configure logging, and invoke the async runner.
+    """
     setup_logging()
-    logger = logging.getLogger(__name__)
-
-    parser = argparse.ArgumentParser(description='Extract adoption profiles from URLs in CSV asynchronously.')
-    parser.add_argument('csv_path', help='Path to the input CSV file containing URLs')
-    parser.add_argument('-o', '--output', default='./data/cats/adoption_profiles.json',
-                        help='Path to the output JSON file (default: ./data/cats/adoption_profiles.json)')
-    parser.add_argument('-n', '--concurrency', type=int, default=10,
-                        help='Number of simultaneous requests (default: 10)')
-
+    parser = argparse.ArgumentParser(
+        description="Extract adoption profiles from URLs in CSV asynchronously."
+    )
+    parser.add_argument(
+        'csv_path',
+        help='Path to the input CSV file containing pet_id and link columns'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        default='./data/cats/adoption_profiles.json',
+        help='Path to the output JSON file (default: ./data/cats/adoption_profiles.json)'
+    )
+    parser.add_argument(
+        '-n', '--concurrency',
+        type=int,
+        default=10,
+        help='Number of simultaneous requests (default: 10)'
+    )
     args = parser.parse_args()
 
     logger.info("Starting profile extraction process...")
